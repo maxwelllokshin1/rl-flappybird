@@ -376,14 +376,20 @@ async def main():
     Handles events, updates game state, and renders the frame.
     """
     global bird_movement, game_active, score, high_score, bird_index, bird_surface, bird_rectangle, pipe_list, floor_x_position
-
+    was_active = True
+    
+    from rl_player import load_decisions
+    load_decisions()
+    
     while True:
         # Event Handling
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                from rl_player import save_decisions
+                save_decisions()
                 pygame.quit()
                 sys.exit()
-
+    
             if event.type == pygame.KEYDOWN:
                 # Flap Mechanic
                 if event.key == pygame.K_SPACE and game_active:
@@ -432,20 +438,40 @@ async def main():
         if game_active:
             # --- Active Gameplay State ---
             
+            from rl_player import state, action, reward, update_decision
+            
+            cur_state = state(bird_rectangle, bird_movement, pipe_list)
+            cur_action = action(cur_state)
+            
+            if cur_action:
+                bird_movement = -FLAP_STRENGTH
+                flap_sound.play()
+            
             # 1. Physics: Apply Gravity
-            bird_movement += GRAVITY
+            bird_movement += GRAVITY # velocity
             
             # 2. Physics: Rotation
             rotated_bird = rotate_bird(bird_surface)
-            bird_rectangle.centery += bird_movement
+            bird_rectangle.centery += bird_movement # position 
             screen.blit(rotated_bird, bird_rectangle)
             
             # 3. Collision Detection
             game_active = check_collision(pipe_list)
 
+            # inside the main loop, after game_active = check_collision(pipe_list)
+            if was_active and not game_active:
+                from rl_player import decay_epsilon
+                decay_epsilon()
+            was_active = game_active
+
             # 4. Obstacle Update
             pipe_list = move_pipes(pipe_list)
             draw_pipes(pipe_list)
+            
+            
+            next_state = state(bird_rectangle, bird_movement, pipe_list)
+            value = reward(cur_state, next_state, game_active)
+            update_decision(cur_state, cur_action, value, next_state, game_active)
 
             # 5. Scoring System
             # Check if bird passed the pipe (Pipe Center X passes 100)
@@ -463,6 +489,14 @@ async def main():
             screen.blit(game_over_surface, game_over_rectangle)
             high_score = update_score(score, high_score)
             score_display('game_over')
+
+        if not was_active:
+            game_active         = True
+            pipe_list.clear() # Reset obstacles
+            bird_rectangle.center = (100, 512)
+            bird_movement       = 0
+            score               = 0
+            score_sound_countdown = 100
 
         # Floor Animation (Independent of game state for visual polish)
         floor_x_position -= 1
