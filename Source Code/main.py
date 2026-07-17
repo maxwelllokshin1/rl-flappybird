@@ -124,7 +124,7 @@ def move_pipes(pipes):
     """
     for pipe in pipes:
         pipe.centerx -= 5   # Move pipe leftward by 5 pixels per frame
-    return pipes
+    return [pipe for pipe in pipes if pipe.right > -50]
 
 
 def draw_pipes(pipes):
@@ -212,9 +212,9 @@ def bird_animation():
     new_bird = bird_frames[bird_index]
     new_bird_rectangle = new_bird.get_rect(center=(100, bird_rectangle.centery))
     return new_bird, new_bird_rectangle
+step=0
 
-
-def score_display(game_state):
+def score_display(game_state, best):
     """
     Renders textual score information based on game state.
     
@@ -223,7 +223,7 @@ def score_display(game_state):
     """
     if game_state == 'main_game':
         # Live Score
-        score_surface = game_font.render(str(int(score)), True, (255, 255, 255))
+        score_surface = game_font.render(f"{int(score)}  STEP:{int(step)}  BEST:{int(best)}", True, (255, 255, 255))
         score_rectangle = score_surface.get_rect(center=(288, 100))
         screen.blit(score_surface, score_rectangle)
 
@@ -249,6 +249,16 @@ def update_score(current_score, current_high_score):
 # ============================================================================
 # INITIALIZATION
 # ============================================================================
+
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--headless", action="store_true", help="Run without a visible window (fastest training)")
+parser.add_argument("--turbo", action="store_true", help="Start in turbo mode (uncapped FPS, minimal rendering)")
+args = parser.parse_args()
+
+if args.headless:
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 # Audio Mixer: Pre-init required to avoid audio lag
 pygame.mixer.pre_init(frequency=44100, size=16, channels=1, buffer=512)
@@ -360,8 +370,8 @@ score_sound = load_sound('sound/sfx_point.wav')
 # ============================================================================
 # EVENT TIMERS
 # ============================================================================
-SPAWNPIPE = pygame.USEREVENT
-pygame.time.set_timer(SPAWNPIPE, PIPE_SPAWN_TIME)
+PIPE_SPAWN_FRAMES = int(PIPE_SPAWN_TIME / 1000 * FPS)   # 144 frames, same cadence as before
+pipe_spawn_counter = 0
 
 BIRDFLAP = pygame.USEREVENT + 1
 pygame.time.set_timer(BIRDFLAP, 200)
@@ -375,139 +385,167 @@ async def main():
     The main game loop, utilizing asyncio for browser compatibility.
     Handles events, updates game state, and renders the frame.
     """
-    global bird_movement, game_active, score, high_score, bird_index, bird_surface, bird_rectangle, pipe_list, floor_x_position
+    global bird_movement, game_active, score, high_score, bird_index, bird_surface, bird_rectangle, pipe_list, floor_x_position,step, pipe_spawn_counter
     was_active = True
     
-    from rl_player import load_decisions
-    load_decisions()
     
-    while True:
-        # Event Handling
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                from rl_player import save_decisions
-                save_decisions()
-                pygame.quit()
-                sys.exit()
+    TURBO = False
+    RENDER_EVERY = 1
+    frame_counter = 0
     
-            if event.type == pygame.KEYDOWN:
-                # Flap Mechanic
-                if event.key == pygame.K_SPACE and game_active:
-                    bird_movement = 0
-                    bird_movement -= FLAP_STRENGTH
-                    flap_sound.play()
+    import rl_player
+    rl_player.load_decisions()
+    
+    try: 
+        while True:
+            # Event Handling
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    from rl_player import save_decisions
+                    save_decisions()
+                    pygame.quit()
+                    sys.exit()
+        
+                if event.type == pygame.KEYDOWN:
+                    # Flap Mechanic
+                    if event.key == pygame.K_SPACE and game_active:
+                        bird_movement = 0
+                        bird_movement -= FLAP_STRENGTH
+                        flap_sound.play()
 
-                # Restart Mechanic
-                if event.key == pygame.K_SPACE and not game_active:
-                    game_active         = True
-                    pipe_list.clear() # Reset obstacles
-                    bird_rectangle.center = (100, 512)
-                    bird_movement       = 0
-                    score               = 0
-                    score_sound_countdown = 100
+                    # Restart Mechanic
+                    if event.key == pygame.K_SPACE and not game_active:
+                        game_active         = True
+                        pipe_list.clear() # Reset obstacles
+                        bird_rectangle.center = (100, 512)
+                        bird_movement       = 0
+                        score               = 0
+                        score_sound_countdown = 100
+                    
+                    # TURBO MODE
+                    if event.key == pygame.K_t:
+                        TURBO = not TURBO
+                        rl_player.VERBOSE = not TURBO
+                        vol = 0 if TURBO else 1
+                        flap_sound.set_volume(vol)
+                        death_sound.set_volume(vol)
+                        score_sound.set_volume(vol)
+                        RENDER_EVERY = 60 if TURBO else 1
+                        print(f"[TURBO] {'ON' if TURBO else 'OFF'}")
 
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                # Flap Mechanic (Mouse)
-                if game_active:
-                    bird_movement = 0
-                    bird_movement -= FLAP_STRENGTH
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    # Flap Mechanic (Mouse)
+                    if game_active:
+                        bird_movement = 0
+                        bird_movement -= FLAP_STRENGTH
+                        flap_sound.play()
+                    
+                    # Restart Mechanic (Mouse)
+                    else:
+                        game_active         = True
+                        pipe_list.clear() # Reset obstacles
+                        bird_rectangle.center = (100, 512)
+                        bird_movement       = 0
+                        score               = 0
+                        score_sound_countdown = 100
+
+                if event.type == BIRDFLAP:
+                    if bird_index < 2:
+                        bird_index += 1
+                    else:
+                        bird_index = 0
+                    bird_surface, bird_rectangle = bird_animation()
+
+            if game_active:
+                pipe_spawn_counter += 1
+                if pipe_spawn_counter >= PIPE_SPAWN_FRAMES:
+                    pipe_list.extend(create_pipe())
+                    pipe_spawn_counter = 0
+
+            # Render Background
+            screen.blit(background_surface, (0, 0))
+
+            if game_active:
+                # --- Active Gameplay State ---
+                
+                from rl_player import state, action, reward, update_decision
+                
+                cur_state, cur_raw = state(bird_rectangle, bird_movement, pipe_list)
+                cur_action = action(cur_state)
+                
+                if cur_action:
+                    bird_movement = -FLAP_STRENGTH
                     flap_sound.play()
                 
-                # Restart Mechanic (Mouse)
-                else:
-                    game_active         = True
-                    pipe_list.clear() # Reset obstacles
-                    bird_rectangle.center = (100, 512)
-                    bird_movement       = 0
-                    score               = 0
-                    score_sound_countdown = 100
+                # 1. Physics: Apply Gravity
+                bird_movement += GRAVITY # velocity
+                
+                # 2. Physics: Rotation
+                rotated_bird = rotate_bird(bird_surface)
+                bird_rectangle.centery += bird_movement # position 
+                screen.blit(rotated_bird, bird_rectangle)
+                
+                # 3. Collision Detection
+                game_active = check_collision(pipe_list)
 
-            if event.type == SPAWNPIPE:
-                pipe_list.extend(create_pipe())
+                # inside the main loop, after game_active = check_collision(pipe_list)
+                if was_active and not game_active:
+                    from rl_player import decay_epsilon
+                    decay_epsilon()
+                    step += 1
+                was_active = game_active
 
-            if event.type == BIRDFLAP:
-                if bird_index < 2:
-                    bird_index += 1
-                else:
-                    bird_index = 0
-                bird_surface, bird_rectangle = bird_animation()
+                # 4. Obstacle Update
+                pipe_list = move_pipes(pipe_list)
+                draw_pipes(pipe_list)
+                
+                
+                next_state, next_raw = state(bird_rectangle, bird_movement, pipe_list)
+                value = reward(cur_state, cur_raw, next_state, next_raw, game_active)
+                update_decision(cur_state, cur_action, value, next_state, game_active)
 
-        # Render Background
-        screen.blit(background_surface, (0, 0))
+                # 5. Scoring System
+                # Check if bird passed the pipe (Pipe Center X passes 100)
+                for pipe in pipe_list:
+                    if pipe.centerx == 100:
+                        score += 0.5 
+                        if score % 1 == 0:
+                            score_sound.play()
+                            if int(score) > rl_player.best_pipes:
+                                rl_player.best_pipes = int(score)
+                
+                score_display('main_game', rl_player.best_pipes)
+                
+                # 6. Audio Feedback (Score) - Handled above
+            else:
+                # --- Game Over State ---
+                screen.blit(game_over_surface, game_over_rectangle)
+                high_score = update_score(score, high_score)
+                score_display('game_over', rl_player.best_pipes)
 
-        if game_active:
-            # --- Active Gameplay State ---
-            
-            from rl_player import state, action, reward, update_decision
-            
-            cur_state = state(bird_rectangle, bird_movement, pipe_list)
-            cur_action = action(cur_state)
-            
-            if cur_action:
-                bird_movement = -FLAP_STRENGTH
-                flap_sound.play()
-            
-            # 1. Physics: Apply Gravity
-            bird_movement += GRAVITY # velocity
-            
-            # 2. Physics: Rotation
-            rotated_bird = rotate_bird(bird_surface)
-            bird_rectangle.centery += bird_movement # position 
-            screen.blit(rotated_bird, bird_rectangle)
-            
-            # 3. Collision Detection
-            game_active = check_collision(pipe_list)
+            if not was_active:
+                game_active         = True
+                pipe_list.clear() # Reset obstacles
+                pipe_spawn_counter = 0
+                bird_rectangle.center = (100, 512)
+                bird_movement       = 0
+                score               = 0
+                score_sound_countdown = 100
 
-            # inside the main loop, after game_active = check_collision(pipe_list)
-            if was_active and not game_active:
-                from rl_player import decay_epsilon
-                decay_epsilon()
-            was_active = game_active
+            # Floor Animation (Independent of game state for visual polish)
+            floor_x_position -= 1
+            draw_floor()
+            if floor_x_position <= -576:
+                floor_x_position = 0
 
-            # 4. Obstacle Update
-            pipe_list = move_pipes(pipe_list)
-            draw_pipes(pipe_list)
-            
-            
-            next_state = state(bird_rectangle, bird_movement, pipe_list)
-            value = reward(cur_state, next_state, game_active)
-            update_decision(cur_state, cur_action, value, next_state, game_active)
-
-            # 5. Scoring System
-            # Check if bird passed the pipe (Pipe Center X passes 100)
-            for pipe in pipe_list:
-                if pipe.centerx == 100:
-                    score += 0.5 
-                    if score % 1 == 0:
-                        score_sound.play()
-            
-            score_display('main_game')
-            
-            # 6. Audio Feedback (Score) - Handled above
-        else:
-            # --- Game Over State ---
-            screen.blit(game_over_surface, game_over_rectangle)
-            high_score = update_score(score, high_score)
-            score_display('game_over')
-
-        if not was_active:
-            game_active         = True
-            pipe_list.clear() # Reset obstacles
-            bird_rectangle.center = (100, 512)
-            bird_movement       = 0
-            score               = 0
-            score_sound_countdown = 100
-
-        # Floor Animation (Independent of game state for visual polish)
-        floor_x_position -= 1
-        draw_floor()
-        if floor_x_position <= -576:
-            floor_x_position = 0
-
-        # Frame Update
-        pygame.display.update()
-        clock.tick(FPS)
-        await asyncio.sleep(0)  # Critical yield for WebAssembly environment
-
+            # Frame Update
+            frame_counter += 1
+            if not TURBO or frame_counter % RENDER_EVERY == 0:
+                pygame.display.update()
+            clock.tick(0 if TURBO else FPS)
+            await asyncio.sleep(0)  # Critical yield for WebAssembly environment
+    finally:
+        rl_player.save_decisions()
+        print("[EXIT] progress saved")
 if __name__ == "__main__":
     asyncio.run(main())
